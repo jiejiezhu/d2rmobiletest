@@ -1,0 +1,72 @@
+name: Build from source (test)
+run-name: Native source test · ${{ inputs.source_ref || 'pinned release' }}
+on:
+  workflow_dispatch:
+    inputs:
+      source_repository:
+        description: Upstream source repository or your fork
+        type: string
+        default: jhaizhou-ops/d2r-mobile
+      source_ref:
+        description: Branch, tag or commit (empty uses the pinned release)
+        type: string
+        default: ''
+permissions:
+  contents: write
+  actions: read
+concurrency:
+  group: d2r-source-test
+  cancel-in-progress: false
+jobs:
+  prepare:
+    uses: ./.github/workflows/pack.yml
+    with:
+      native_build: true
+      publish_release: false
+      source_repository: ${{ inputs.source_repository }}
+      source_ref: ${{ inputs.source_ref }}
+    secrets: inherit
+  native:
+    needs: prepare
+    runs-on: macos-26
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        minimum: ['26.0', '18.0']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: native-source-inputs
+          path: outputs
+      - name: Select macOS 26 and Xcode with iOS 26.4+ SDK
+        run: python3 scripts/source/select_xcode.py
+      - name: Prepare small native build dependencies
+        run: |
+          brew list xcodegen >/dev/null 2>&1 || brew install xcodegen
+          python3 -m venv .venv
+          .venv/bin/pip install PyYAML==6.0.2
+          tar -xzf outputs/native-inputs.tar.gz
+          cp outputs/build-config.json build-config.json
+      - name: Compile app from source and verify the IPA
+        env:
+          MINIMUM_IOS: ${{ matrix.minimum }}
+        run: |
+          set -o pipefail
+          .venv/bin/python scripts/source/build.py "$MINIMUM_IOS" 2>&1 | tee outputs/native-build.log
+      - name: Upload source test IPA and verification reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: D2RMobile-source-ios${{ matrix.minimum }}-${{ github.run_number }}
+          path: |
+            outputs/D2RMobile-source-*.ipa
+            outputs/source*-report.json
+            outputs/source*-SHA256SUMS.txt
+            outputs/legacy-resources.json
+            outputs/native-build.log
+          retention-days: 7
+          compression-level: 0

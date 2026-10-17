@@ -1,0 +1,56 @@
+name: Probe remote game source
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Fetch and verify configured torrent metadata
+        env:
+          GAME_INPUT_MANIFEST: ${{ secrets.GAME_INPUT_MANIFEST }}
+        run: |
+          python3 - <<'PY'
+          import re, sys
+          from pathlib import Path
+          sys.path.insert(0, 'scripts')
+          import ci
+          manifest = ci.input_manifest()
+          item = next((item for item in manifest['files'] if item['name'].lower().endswith('.torrent')), None)
+          if item is None:
+              raise SystemExit('This diagnostic requires a torrent input in GAME_INPUT_MANIFEST')
+          if not re.fullmatch(r'[a-fA-F0-9]{64}', item.get('sha256', '')):
+              raise SystemExit('Torrent metadata requires a pinned SHA256')
+          selected = item.get('select', [])
+          if not selected or any(type(index) is not int or index < 1 for index in selected):
+              raise SystemExit('Torrent input requires positive file indices in select')
+          ci.download(item['url'], Path('candidate.torrent'), item['sha256'])
+          Path('selection.txt').write_text(str(selected[-1]))
+          print('Configured torrent metadata verified; source URL omitted')
+          PY
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends aria2
+          aria2c --show-files candidate.torrent
+      - name: Test selected package download for at most 150 seconds
+        run: |
+          mkdir sample
+          status=0
+          timeout 150 aria2c --dir=sample --select-file="$(cat selection.txt)" --seed-time=0 \
+            --file-allocation=none --max-overall-download-limit=1M \
+            --summary-interval=30 --bt-stop-timeout=120 \
+            --console-log-level=warn --enable-color=false candidate.torrent || status=$?
+          echo "Downloader exit status: $status"
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          files = list(Path('sample').rglob('*.nsp'))
+          received = sum(p.stat().st_blocks * 512 for p in files)
+          print(f'Actual allocated downloaded data: {received} bytes')
+          if received < 1024 * 1024:
+              raise SystemExit('No usable seed transferred 1 MiB during the probe')
+          print('Source connectivity confirmed; this is only a partial download, not a validated game input.')
+          PYCODE
